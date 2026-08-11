@@ -1,0 +1,340 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2822
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww28600\viewh14700\viewkind0
+\deftab720
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f0\fs48 \cf0 \expnd0\expndtw0\kerning0
+/*\
+===============================================================================\
+Project: Digital Music Store Data Analysis\
+Description: SQL queries analyzing customer purchasing behavior, regional \
+             sales, product inventory, and employee workload.\
+===============================================================================\
+*/\
+\
+/* ---------------------------------------------------------------------------\
+   PART 1: BASIC AGGREGATIONS & SUMMARY STATISTICS\
+--------------------------------------------------------------------------- */\
+\
+-- Total value per customer\
+SELECT\
+    CustomerId,\
+    SUM(total) AS TotalValue\
+FROM Invoice\
+GROUP BY CustomerId\
+ORDER BY TotalValue DESC;\
+\
+-- Total and average revenue per country and city\
+SELECT\
+    BillingCountry, \
+    BillingCity,\
+    ROUND(AVG(total), 2) AS AverageCountry\
+FROM Invoice\
+GROUP BY \
+    BillingCountry,\
+    BillingCity\
+ORDER BY AverageCountry DESC;\
+\
+-- Number of unique customers for each city\
+SELECT\
+    COUNT(DISTINCT CustomerId) AS CustomerCount,\
+    BillingCity\
+FROM Invoice\
+GROUP BY BillingCity;\
+\
+-- Overall revenue summary\
+SELECT\
+    AVG(total) AS AverageInvoice,\
+    MIN(total) AS MinInvoice,\
+    MAX(total) AS MaxInvoice,\
+    SUM(total) AS TotalRevenue\
+FROM Invoice;\
+\
+\
+/* ---------------------------------------------------------------------------\
+   PART 2: CONDITIONAL LOGIC (CASE STATEMENTS)\
+--------------------------------------------------------------------------- */\
+\
+-- Customer Tiers: Categorize individual purchases\
+SELECT\
+    total,\
+    CASE\
+        WHEN total < 2.00 THEN 'Low Purchase'\
+        WHEN total BETWEEN 2.00 AND 5.00 THEN 'Standard Purchase'\
+        ELSE 'Major Purchase'\
+    END AS PurchaseCategory\
+FROM Invoice;\
+\
+-- Product Categorization: Flag tracks by length in minutes\
+SELECT\
+    Name,\
+    (Milliseconds / 60000.0) AS Minutes,\
+    CASE\
+        WHEN (Milliseconds / 60000.0) < 2 THEN 'Short'\
+        WHEN (Milliseconds / 60000.0) BETWEEN 2 AND 5 THEN 'Medium' \
+        ELSE 'Long'\
+    END AS TrackSize\
+FROM Track;\
+\
+-- Regional Comparisons: North America vs Globe\
+SELECT\
+    CASE    \
+        WHEN BillingCountry IN ('USA', 'Canada') THEN 'North America'\
+        ELSE 'Globe'\
+    END AS Location,\
+    SUM(total) AS TotalRevenue\
+FROM Invoice\
+GROUP BY Location;\
+\
+-- Staff Workload: Employee capacity tier system\
+SELECT\
+    e.EmployeeId,\
+    e.FirstName,\
+    e.LastName,\
+    COUNT(c.CustomerId) AS ManagedCustomers,\
+    CASE \
+        WHEN COUNT(c.CustomerId) > 20 THEN 'High Capacity'\
+        ELSE 'Normal Capacity'\
+    END AS Capacity\
+FROM Employee AS e\
+INNER JOIN Customer AS c\
+    ON e.EmployeeId = c.SupportRepId\
+GROUP BY e.EmployeeId;\
+\
+\
+/* ---------------------------------------------------------------------------\
+   PART 3: WINDOW FUNCTIONS & COHORT ANALYSIS\
+--------------------------------------------------------------------------- */\
+\
+-- First vs. Latest Gift: Date and amount using ROW_NUMBER()\
+WITH RankedInvoices AS (\
+    SELECT\
+        CustomerId,\
+        InvoiceDate,\
+        Total,\
+        ROW_NUMBER() OVER (PARTITION BY CustomerId ORDER BY InvoiceDate ASC) AS rn,\
+        COUNT(*) OVER (PARTITION BY CustomerId) AS TotalInvoicesForCustomer\
+    FROM Invoice\
+)\
+SELECT\
+    r.CustomerId,\
+    c.FirstName,\
+    c.LastName,\
+    MAX(CASE WHEN r.rn = 1 THEN r.InvoiceDate END) AS FirstInvoiceDate, \
+    MAX(CASE WHEN r.rn = 1 THEN r.total END) AS FirstInvoiceTotal,\
+    MAX(CASE WHEN r.rn = r.TotalInvoicesForCustomer THEN r.InvoiceDate END) AS LastInvoiceDate,\
+    MAX(CASE WHEN r.rn = r.TotalInvoicesForCustomer THEN r.total END) AS LastInvoiceTotal\
+FROM RankedInvoices AS r\
+INNER JOIN Customer AS c\
+    ON r.CustomerId = c.CustomerId\
+GROUP BY \
+    r.CustomerId, \
+    c.FirstName, \
+    c.LastName;\
+\
+-- Lifetime Value (Cumulative): Running total of revenue per customer\
+SELECT\
+    i.CustomerId,\
+    c.FirstName,\
+    c.LastName,\
+    SUM(i.total) AS TotalPurchase\
+FROM Invoice AS i\
+INNER JOIN Customer AS c\
+    ON i.CustomerId = c.CustomerId\
+GROUP BY \
+    i.CustomerId, \
+    c.FirstName, \
+    c.LastName\
+ORDER BY i.InvoiceDate ASC;\
+\
+-- Time Between Gifts: Days between first and second purchase\
+WITH InvoiceRank AS (\
+    SELECT\
+        CustomerId,\
+        InvoiceDate,\
+        ROW_NUMBER() OVER (PARTITION BY CustomerId ORDER BY InvoiceDate ASC) AS rn\
+    FROM Invoice\
+)\
+SELECT \
+    CustomerId,\
+    MAX(CASE WHEN rn = 1 THEN InvoiceDate END) AS FirstPurchase,\
+    MAX(CASE WHEN rn = 2 THEN InvoiceDate END) AS SecondPurchase,\
+    JULIANDAY(MAX(CASE WHEN rn = 2 THEN InvoiceDate END)) - JULIANDAY(MAX(CASE WHEN rn = 1 THEN InvoiceDate END)) AS DaysBetween\
+FROM InvoiceRank\
+GROUP BY CustomerId\
+ORDER BY CustomerId;\
+\
+-- Top Donor Rankings: Rank customers by lifetime amount spent\
+SELECT\
+    CustomerId, \
+    SUM(total) AS LifetimeValue\
+FROM Invoice\
+GROUP BY CustomerId\
+ORDER BY LifetimeValue DESC;\
+\
+\
+/* ---------------------------------------------------------------------------\
+   PART 4: JOINS & HANDLING MISSING/INCOMPLETE DATA\
+--------------------------------------------------------------------------- */\
+\
+-- Unengaged Prospects: Tracks that have never been purchased\
+SELECT\
+    TrackId, \
+    Name\
+FROM Track\
+WHERE TrackId NOT IN (\
+    SELECT DISTINCT i.TrackId\
+    FROM InvoiceLine AS i\
+    INNER JOIN Track AS t \
+        ON i.TrackId = t.TrackId\
+);\
+\
+-- Portfolio Mapping: Show all customers and their assigned reps\
+SELECT\
+    c.CustomerId,\
+    c.FirstName AS CustomerFirstName,\
+    c.LastName AS CustomerLastName,\
+    e.FirstName AS RepFirstName,\
+    e.LastName AS RepLastName\
+FROM Customer AS c \
+LEFT JOIN Employee AS e\
+    ON c.SupportRepId = e.EmployeeId;\
+\
+-- Zero-Revenue Categories: Genres with exactly zero revenue\
+SELECT DISTINCT g.Name\
+FROM Track AS t\
+INNER JOIN Genre AS g\
+    ON t.GenreId = g.GenreId\
+WHERE t.TrackId NOT IN (\
+    SELECT il.TrackId\
+    FROM InvoiceLine AS il\
+    INNER JOIN Track AS t2 \
+        ON il.TrackId = t2.TrackId\
+);\
+\
+\
+/* ---------------------------------------------------------------------------\
+   PART 5: DATE MANIPULATION & YEAR-OVER-YEAR TRENDS\
+--------------------------------------------------------------------------- */\
+\
+-- Monthly Revenue Trends\
+SELECT\
+    STRFTIME('%m', InvoiceDate) AS Month,\
+    SUM(total) AS TotalRevenue\
+FROM Invoice\
+GROUP BY Month\
+ORDER BY Month ASC;\
+\
+-- Year-Over-Year (YoY) Growth: 2012 vs 2013\
+SELECT\
+    SUM(CASE WHEN STRFTIME('%Y', InvoiceDate) = '2012' THEN total END) AS Revenue_2012,\
+    SUM(CASE WHEN STRFTIME('%Y', InvoiceDate) = '2013' THEN total END) AS Revenue_2013\
+FROM Invoice;\
+\
+-- Year-to-Year Retention: Customers who purchased in 2009 and 2010\
+SELECT DISTINCT \
+    CASE WHEN STRFTIME('%Y', InvoiceDate) = '2010' THEN CustomerId END AS CustomerInBoth\
+FROM Invoice\
+WHERE CustomerId IN (\
+    SELECT CASE WHEN STRFTIME('%Y', InvoiceDate) = '2009' THEN CustomerId END\
+    FROM Invoice\
+)\
+AND CustomerInBoth IS NOT NULL;\
+\
+-- Average Time to Repurchase\
+WITH PurchaseLags AS (\
+    SELECT\
+        CustomerId,\
+        InvoiceDate,\
+        ROW_NUMBER() OVER(PARTITION BY CustomerId ORDER BY InvoiceDate ASC) AS PurchaseNumber,\
+        JULIANDAY(InvoiceDate) - JULIANDAY(LAG(InvoiceDate) OVER(PARTITION BY CustomerId ORDER BY InvoiceDate ASC)) AS PurchaseLag\
+    FROM Invoice\
+)\
+SELECT\
+    CustomerId,\
+    AVG(PurchaseLag) AS AvgDaysBetweenPurchases\
+FROM PurchaseLags\
+GROUP BY CustomerId;\
+\
+\
+/* ---------------------------------------------------------------------------\
+   PART 6: CTEs & SUBQUERIES (COMPLEX LOGIC)\
+--------------------------------------------------------------------------- */\
+\
+-- Top Tier Demographics: Most common genre for top 5 customers\
+WITH RankedCustomers AS (\
+    SELECT\
+        CustomerId,\
+        SUM(total) AS TotalSpent\
+    FROM Invoice\
+    GROUP BY CustomerId\
+    ORDER BY TotalSpent DESC\
+    LIMIT 5\
+),\
+CustomerGenres AS (\
+    SELECT\
+        i.CustomerId,\
+        g.Name AS GenreName\
+    FROM Invoice AS i \
+    INNER JOIN InvoiceLine AS il \
+        ON i.InvoiceId = il.InvoiceId\
+    INNER JOIN Track AS t \
+        ON il.TrackId = t.TrackId    \
+    INNER JOIN Genre AS g \
+        ON t.GenreId = g.GenreId\
+)\
+SELECT\
+    cg.GenreName,\
+    COUNT(cg.GenreName) AS PurchaseCount\
+FROM RankedCustomers AS rc\
+INNER JOIN CustomerGenres AS cg \
+    ON rc.CustomerId = cg.CustomerId\
+GROUP BY cg.GenreName\
+ORDER BY PurchaseCount DESC;\
+\
+-- Above Average Gifts: Invoices greater than the overall average\
+SELECT\
+    InvoiceId,\
+    Total\
+FROM Invoice\
+WHERE Total > (SELECT AVG(total) FROM Invoice);\
+\
+-- Pareto Principle (80/20 Rule): Top 10% customers' revenue percentage\
+SELECT\
+    ROW_NUMBER() OVER(ORDER BY SUM(total) DESC) AS CustomerRank,\
+    CustomerId,\
+    SUM(total) AS Total,\
+    ROUND(SUM(total) / (SELECT SUM(total) FROM Invoice) * 100, 2) AS PercentageOfTotalDBRevenue\
+FROM Invoice\
+GROUP BY CustomerId\
+LIMIT 6;\
+\
+-- High-Performing Staff: Employees managing over $800 in total sales\
+WITH CustomerPurchases AS (\
+    SELECT\
+        CustomerId,\
+        SUM(total) AS TotalPurchase\
+    FROM Invoice\
+    GROUP BY CustomerId\
+),\
+EmployeeSales AS (\
+    SELECT\
+        c.SupportRepId AS Id,\
+        SUM(cp.TotalPurchase) AS TotalSell\
+    FROM CustomerPurchases AS cp\
+    INNER JOIN Customer AS c\
+        ON cp.CustomerId = c.CustomerId\
+    GROUP BY c.SupportRepId\
+)\
+SELECT\
+    e.EmployeeId,\
+    e.FirstName,\
+    e.LastName,\
+    s.TotalSell\
+FROM Employee AS e\
+INNER JOIN EmployeeSales AS s\
+    ON e.EmployeeId = s.Id\
+WHERE s.TotalSell > 800;}
